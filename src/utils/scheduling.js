@@ -48,7 +48,36 @@ export function buildSmartSchedule(subjectsArr, days, intensity) {
     return wb - wa || b.difficulty - a.difficulty || a.name.localeCompare(b.name)
   })
 
-  // Step 3: slots per day
+  // Step 3: order days starting from today
+  const todayIdx    = days.indexOf(todayDayName())
+  const orderedDays = todayIdx >= 0
+    ? [...days.slice(todayIdx), ...days.slice(0, todayIdx)]
+    : days
+
+  const dayOffset = {}
+  days.forEach(d => {
+    const idx = orderedDays.indexOf(d)
+    dayOffset[d] = idx >= 0 ? idx : 999
+  })
+
+  // Step 4: for each subject, figure out how many days it's available on
+  // then calculate max sessions per day for that subject so all hours fit
+  const subjectDailyMax = {}
+  subjectsArr.forEach(s => {
+    const availableDays = days.filter(d => {
+      const offset = dayOffset[d]
+      if (s.examDate) {
+        const daysLeft = daysUntilExam(s.examDate)
+        if (daysLeft !== null && offset > daysLeft) return false
+      }
+      return true
+    })
+    const count = Math.max(availableDays.length, 1)
+    // spread all sessions across available days — at least 1 per day, but enough to fit total
+    subjectDailyMax[s.id] = Math.ceil(sessionMap[s.id] / count)
+  })
+
+  // Step 5: slots per day — based on total sessions across all subjects
   const totalSessions = Object.values(sessionMap).reduce((a, b) => a + b, 0)
   const wdCount = days.filter(d => !isWknd(d)).length
   const weCount = days.filter(d =>  isWknd(d)).length
@@ -62,26 +91,28 @@ export function buildSmartSchedule(subjectsArr, days, intensity) {
          : base
   }
 
+  // Slots per day must be large enough to fit all urgent subjects
+  // so we take the max of the calculated base and sum of subject daily maxes
   const slotsPerDay = {}
-  days.forEach(d => { slotsPerDay[d] = isWknd(d) ? weBase : wdBase })
-
-  // Step 4: order days starting from today
-  const todayIdx    = days.indexOf(todayDayName())
-  const orderedDays = todayIdx >= 0
-    ? [...days.slice(todayIdx), ...days.slice(0, todayIdx)]
-    : days
-
-  const dayOffset = {}
   days.forEach(d => {
-    const idx = orderedDays.indexOf(d)
-    dayOffset[d] = idx >= 0 ? idx : 999
+    const urgentSlots = subjectsArr.reduce((sum, s) => {
+      const offset = dayOffset[d]
+      if (s.examDate) {
+        const daysLeft = daysUntilExam(s.examDate)
+        if (daysLeft !== null && offset > daysLeft) return sum
+      }
+      return sum + subjectDailyMax[s.id]
+    }, 0)
+    const base = isWknd(d) ? weBase : wdBase
+    slotsPerDay[d] = Math.max(base, urgentSlots)
   })
 
   const schedule  = {}
   const remaining = { ...sessionMap }
-  days.forEach(d => { schedule[d] = [] })
+  const placedPerDayPerSubject = {} // track how many times each subject placed per day
+  days.forEach(d => { schedule[d] = []; placedPerDayPerSubject[d] = {} })
 
-  // Step 5: fill schedule — multiple passes
+  // Step 6: fill schedule — multiple passes
   let changed = true
   let passes  = 0
   while (changed && passes < 20) {
@@ -101,11 +132,14 @@ export function buildSmartSchedule(subjectsArr, days, intensity) {
           if (remaining[s.id] <= 0) return false
           if (!usedToday.has(s.id) && usedToday.size >= maxU) return false
           if (lastPlaced && lastPlaced.id === s.id) return false
-          // Only schedule on days before exam
+          // only schedule on days before exam
           if (s.examDate) {
             const daysLeft = daysUntilExam(s.examDate)
             if (daysLeft !== null && offsetToday > daysLeft) return false
           }
+          // don't exceed this subject's daily max for this day
+          const placedToday = placedPerDayPerSubject[day][s.id] || 0
+          if (placedToday >= subjectDailyMax[s.id]) return false
           return true
         })
 
@@ -114,12 +148,13 @@ export function buildSmartSchedule(subjectsArr, days, intensity) {
         schedule[day].push({ ...candidate, sessionDuration: 1 })
         usedToday.add(candidate.id)
         remaining[candidate.id]--
+        placedPerDayPerSubject[day][candidate.id] = (placedPerDayPerSubject[day][candidate.id] || 0) + 1
         changed = true
       }
     })
   }
 
-  // Step 6: merge consecutive same-subject slots
+  // Step 7: merge consecutive same-subject slots
   days.forEach(day => {
     const merged = []
     schedule[day].forEach(s => {
