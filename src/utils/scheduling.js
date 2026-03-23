@@ -37,7 +37,7 @@ export function buildSmartSchedule(subjectsArr, days, intensity) {
   // Step 1: session counts per subject
   const sessionMap = {}
   subjectsArr.forEach(s => {
-    const base = Math.round(s.hours * mult * (DIFF_MULT[s.difficulty] || 1) * examWeight(s))
+    const base = Math.round(s.hours * mult)
     sessionMap[s.id] = Math.max(1, Math.min(base, 28))
   })
 
